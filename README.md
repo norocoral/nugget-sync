@@ -1,7 +1,6 @@
-<img width="64" height="64" alt="64" src="https://github.com/user-attachments/assets/2d8b8f2e-93ab-4a1d-a2ab-bd018d41a81f" />
+<img width="1920" height="1080" alt="Mar" src="https://github.com/user-attachments/assets/0151f3ad-b7b4-49ea-86a9-85f431f288d8" />
 
-# Nugget Sync
-*I am an Apple Music syncing tool for nuggets.*
+---
 
 > [!NOTE]
 > Only macOS is supported. I have no plans to make a Windows or Linux version
@@ -27,3 +26,14 @@ Once the sync is completed, you can safely eject. Nugget Sync can do it from the
 > [!CAUTION]
 > A .NUGLIB file will be created in the destination device. **DO NOT DELETE IT.**
 > It manages the sync settings for the device and the internal library. If deleted, sync will run slower and potential data loss will occur.
+
+---
+
+# Demo
+
+<img width="674" height="254" alt="1456" src="https://github.com/user-attachments/assets/ddedf7ea-ee23-453d-b0fe-a000a3e56503" />
+
+---
+
+<img width="16" height="16" alt="AppIcon16" src="https://github.com/user-attachments/assets/20c8154e-3125-4f8b-ba68-a51a3708bbfd"/>
+Nugget Sync, MIT license
