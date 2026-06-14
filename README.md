@@ -3,6 +3,9 @@
 # Nugget Sync
 *I am an Apple Music syncing tool for nuggets.*
 
+> [!NOTE]
+> Only macOS is supported. I have no plans to make a Windows or Linux version
+
 ### 0. About me
 Nugget Sync uses your local Apple Music library and allows it to be synced to any device or folder. It supports bi-directional changes, favorites syncing, AAC conversion, selection of library to be synced, playlists syncing and Rockbox specific feature
 
@@ -21,5 +24,6 @@ Please ensure to allow any permissions, such as your Music library and access to
 ### 6. Upon completion
 Once the sync is completed, you can safely eject. Nugget Sync can do it from the UI if you wish.
 
-Important note: A .NUGLIB file will be created in the destination device. **DO NOT DELETE IT.**
-It manages the sync settings for the device and the internal library. If deleted, sync will run slower and potential data loss will occur.
+> [!CAUTION]
+> A .NUGLIB file will be created in the destination device. **DO NOT DELETE IT.**
+> It manages the sync settings for the device and the internal library. If deleted, sync will run slower and potential data loss will occur.
