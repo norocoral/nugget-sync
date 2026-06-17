@@ -35,5 +35,15 @@ Once the sync is completed, you can safely eject. Nugget Sync can do it from the
 
 ---
 
+# Dependencies
+Not required to install on the .app file, but to build and run the script
+
+* macOS Music.app on Sonoma or up (Have not tested on older versions)
+* Python >=3.8
+* PyInstaller >=6.0
+* mutagen >=1.47
+
+---
+
 <img width="16" height="16" alt="AppIcon16" src="https://github.com/user-attachments/assets/20c8154e-3125-4f8b-ba68-a51a3708bbfd"/>
 Nugget Sync, MIT license
