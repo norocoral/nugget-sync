@@ -1,10 +1,8 @@
-import hashlib
-import json
 import sys
+import hashlib
 import json
 import os
 import queue
-import fcntl
 import urllib.request
 import urllib.error
 import re
@@ -19,6 +17,9 @@ from tkinter import *
 from tkinter import ttk, filedialog, messagebox, PhotoImage
 import tkinter as tk
 
+if sys.platform != 'win32':
+    import fcntl
+
 def resource_path(*parts):
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     return base_path.joinpath(*parts)
@@ -30,7 +31,8 @@ try:
     HAS_MUTAGEN = True
 except ImportError:
     HAS_MUTAGEN = False
-DEFAULT_DEST = '/Volumes/NO NAME'
+
+DEFAULT_DEST = 'D:\\' if sys.platform == 'win32' else '/Volumes/NO NAME'
 MEDIA_EXTS = {'.mp3', '.m4a', '.aac', '.flac', '.wav', '.aiff', '.ogg', '.wma', '.mp4', '.m4v', '.mov'}
 MANIFEST_FILE = '.NUGLIB'
 LOCAL_CONFIG = Path.home() / '.nugget_sync_config.json'
@@ -38,6 +40,9 @@ READ_WORKERS = 16
 WRITE_QUEUE_MAX = 30
 ART_WORKERS = 16
 ART_SIZE = 500
+UI_FONT = 'Segoe UI' if sys.platform == 'win32' else 'System'
+MONO_FONT = 'Consolas' if sys.platform == 'win32' else 'Menlo'
+
 JXA_TRACKS = """
 var music = Application('Music');
 var ft    = music.libraryPlaylists[0].fileTracks;
@@ -209,11 +214,281 @@ JSON.stringify({
 });
 """
 
-def run_jxa(script):
-    r = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or 'osascript failed')
-    return json.loads(r.stdout.strip())
+class MediaLibrary:
+    def get_tracks(self):
+        raise NotImplementedError
+        
+    def get_playlists(self):
+        raise NotImplementedError
+        
+    def get_metadata_lists(self):
+        raise NotImplementedError
+        
+    def update_playlist(self, payload):
+        raise NotImplementedError
+        
+    def import_paths(self, paths):
+        raise NotImplementedError
+        
+    def update_counts(self, plays, skips):
+        raise NotImplementedError
+
+class MacMusicLibrary(MediaLibrary):
+    def _run_jxa(self, script, arg=None):
+        cmd = ['osascript', '-l', 'JavaScript', '-e', script]
+        if arg is not None:
+            cmd.append(arg)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or 'osascript failed')
+        stdout = r.stdout.strip()
+        return json.loads(stdout) if stdout else None
+
+    def get_tracks(self):
+        return self._run_jxa(JXA_TRACKS)
+
+    def get_playlists(self):
+        return self._run_jxa(JXA_PLAYLISTS)
+
+    def get_metadata_lists(self):
+        return self._run_jxa(JXA_METADATA_LISTS)
+
+    def update_playlist(self, payload):
+        self._run_jxa(JXA_UPDATE_PLAYLIST, json.dumps(payload))
+
+    def import_paths(self, paths):
+        self._run_jxa(JXA_IMPORT, json.dumps(paths))
+
+    def update_counts(self, plays, skips):
+        self._run_jxa(JXA_UPDATE_COUNTS, json.dumps({"plays": plays, "skips": skips}))
+
+class WindowsITunesLibrary(MediaLibrary):
+    def __init__(self):
+        try:
+            import win32com.client  # type: ignore
+            self.itunes = win32com.client.Dispatch("iTunes.Application")
+        except ImportError:
+            raise RuntimeError("pywin32 is required to use iTunes on Windows.")
+            
+    def _get_tid(self, track):
+        try:
+            high = self.itunes.ITObjectPersistentIDHigh(track)
+            low = self.itunes.ITObjectPersistentIDLow(track)
+            return f"{(high & 0xFFFFFFFF):08X}{(low & 0xFFFFFFFF):08X}"
+        except Exception:
+            return ""
+            
+    def get_tracks(self):
+        tracks = []
+        library_playlist = None
+        for pl in self.itunes.LibrarySource.Playlists:
+            if pl.Kind == 1: # ITPlaylistKindLibrary
+                library_playlist = pl
+                break
+        
+        if not library_playlist:
+            return []
+            
+        for t in library_playlist.Tracks:
+            if t.Kind != 1: # ITTrackKindFile
+                continue
+            
+            tid = self._get_tid(t)
+            if not tid:
+                continue
+            
+            try:
+                loc = t.Location
+                if not loc:
+                    continue
+            except:
+                continue
+                
+            try:
+                mdate = 0
+                if t.ModificationDate:
+                    try:
+                        mdate = int(t.ModificationDate.timestamp() * 1000)
+                    except AttributeError:
+                        import datetime
+                        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+                        dt = datetime.datetime(
+                            t.ModificationDate.year, t.ModificationDate.month, t.ModificationDate.day,
+                            t.ModificationDate.hour, t.ModificationDate.minute, t.ModificationDate.second,
+                            tzinfo=datetime.timezone.utc
+                        )
+                        mdate = int((dt - epoch).total_seconds() * 1000)
+            except:
+                pass
+                
+            try: loved = t.Loved
+            except: loved = False
+            
+            try: bitRate = t.BitRate
+            except: bitRate = 0
+            
+            try: bpm = t.BPM
+            except: bpm = 0
+            
+            try: trackNumber = t.TrackNumber
+            except: trackNumber = 0
+            
+            try: discNumber = t.DiscNumber
+            except: discNumber = 1
+            
+            try: discCount = t.DiscCount
+            except: discCount = 1
+            
+            try: year = t.Year
+            except: year = 0
+            
+            tracks.append({
+                "id": tid,
+                "name": t.Name or "",
+                "artist": t.Artist or "",
+                "albumArtist": t.AlbumArtist or "",
+                "album": t.Album or "",
+                "genre": t.Genre or "",
+                "kind": t.KindAsString or "",
+                "trackNumber": trackNumber,
+                "discNumber": discNumber,
+                "discCount": discCount,
+                "mdate": mdate,
+                "bitRate": bitRate,
+                "bpm": bpm,
+                "year": year,
+                "composer": t.Composer or "",
+                "location": loc,
+                "loved": loved
+            })
+        return tracks
+
+    def get_playlists(self):
+        playlists = []
+        for pl in self.itunes.LibrarySource.Playlists:
+            if pl.Kind != 2: # User playlists
+                continue
+            
+            try:
+                name = pl.Name
+                is_smart = pl.Smart
+            except:
+                continue
+                
+            tids = []
+            for t in pl.Tracks:
+                if t.Kind == 1:
+                    tid = self._get_tid(t)
+                    if tid:
+                        tids.append(tid)
+            
+            if tids:
+                playlists.append({"name": name, "tracks": tids, "smart": is_smart})
+        return playlists
+
+    def get_metadata_lists(self):
+        artists = set()
+        albums = set()
+        genres = set()
+        
+        library_playlist = None
+        for pl in self.itunes.LibrarySource.Playlists:
+            if pl.Kind == 1:
+                library_playlist = pl
+                break
+                
+        if library_playlist:
+            for t in library_playlist.Tracks:
+                if t.Kind == 1:
+                    try:
+                        artists.add(t.Artist or "Unknown Artist")
+                        albums.add(t.Album or "Unknown Album")
+                        genres.add(t.Genre or "Unknown Genre")
+                    except:
+                        pass
+                        
+        return {
+            "artists": sorted(list(artists)),
+            "albums": sorted(list(albums)),
+            "genres": sorted(list(genres))
+        }
+
+    def _get_track_by_id(self, tid):
+        try:
+            high = int(tid[:8], 16)
+            if high >= 0x80000000:
+                high -= 0x100000000
+            low = int(tid[8:], 16)
+            if low >= 0x80000000:
+                low -= 0x100000000
+            return self.itunes.LibraryPlaylist.Tracks.ItemByPersistentID(high, low)
+        except:
+            return None
+
+    def update_playlist(self, payload):
+        if payload.get("is_favorites"):
+            for tid in payload.get("add", []):
+                t = self._get_track_by_id(tid)
+                if t:
+                    try: t.Loved = True
+                    except: pass
+            for tid in payload.get("remove", []):
+                t = self._get_track_by_id(tid)
+                if t:
+                    try: t.Loved = False
+                    except: pass
+        else:
+            name = payload.get("name")
+            target_pl = None
+            for pl in self.itunes.LibrarySource.Playlists:
+                if getattr(pl, 'Name', '') == name and getattr(pl, 'Kind', 0) == 2:
+                    target_pl = pl
+                    break
+            
+            if not target_pl:
+                return
+            
+            remove = set(payload.get("remove", []))
+            if remove:
+                for i in range(target_pl.Tracks.Count, 0, -1):
+                    try:
+                        t = target_pl.Tracks.Item(i)
+                        tid = self._get_tid(t)
+                        if tid in remove:
+                            t.Delete()
+                    except:
+                        pass
+                        
+            for tid in payload.get("add", []):
+                t = self._get_track_by_id(tid)
+                if t:
+                    try: target_pl.AddTrack(t)
+                    except: pass
+
+    def import_paths(self, paths):
+        for p in paths:
+            try:
+                self.itunes.LibraryPlaylist.AddFile(p)
+            except:
+                pass
+
+    def update_counts(self, plays, skips):
+        for tid, count in plays.items():
+            t = self._get_track_by_id(tid)
+            if t:
+                try: t.PlayedCount += count
+                except: pass
+        for tid, count in skips.items():
+            t = self._get_track_by_id(tid)
+            if t:
+                try: t.SkippedCount += count
+                except: pass
+
+def get_media_library():
+    if sys.platform == 'win32':
+        return WindowsITunesLibrary()
+    else:
+        return MacMusicLibrary()
 
 def sanitize(name, max_len=80):
     name = unicodedata.normalize('NFC', str(name))
@@ -311,7 +586,6 @@ def extract_art_bytes(src):
     except Exception:
         pass
     return None
-
 
 def write_metadata_tags(dst, track):
     """Write Music.app metadata fields into an already-copied file on the destination.
@@ -424,9 +698,24 @@ def save_cover(art_bytes, out_path):
         bmp_path = tmp_bmp.name
 
     try:
-        subprocess.run(['sips', '-s', 'format', 'bmp', '-z', str(ART_SIZE), str(ART_SIZE), tmp_path, '--out', bmp_path], capture_output=True)
-        r = subprocess.run(['sips', '-s', 'format', 'jpeg', bmp_path, '--out', str(out_path)], capture_output=True)
-        return r.returncode == 0 and out_path.exists()
+        if sys.platform == 'darwin':
+            subprocess.run(['sips', '-s', 'format', 'bmp', '-z', str(ART_SIZE), str(ART_SIZE), tmp_path, '--out', bmp_path], capture_output=True)
+            r = subprocess.run(['sips', '-s', 'format', 'jpeg', bmp_path, '--out', str(out_path)], capture_output=True)
+            return r.returncode == 0 and out_path.exists()
+        else:
+            try:
+                from PIL import Image
+                with Image.open(tmp_path) as img:
+                    img = img.convert('RGB')
+                    img = img.resize((ART_SIZE, ART_SIZE))
+                    img.save(out_path, 'JPEG')
+                return out_path.exists()
+            except ImportError:
+                try:
+                    r = subprocess.run(['ffmpeg', '-i', tmp_path, '-vf', f'scale={ART_SIZE}:{ART_SIZE}', '-vframes', '1', '-y', str(out_path)], capture_output=True)
+                    return r.returncode == 0 and out_path.exists()
+                except Exception:
+                    return False
     finally:
         for p in (tmp_path, bmp_path):
             try:
@@ -441,12 +730,12 @@ class SyncApp:
         self.is_syncing = False
         self.root = root
         self.root.title('Nugget Sync')
-        self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.config = self._load_local_config()
         last_path = self.config.get('last_path', '')
         known_devices = self.config.get('known_devices', [])
         self.valid_path = ""
+        self.library = get_media_library()
         
         if last_path and Path(last_path).exists():
             self.valid_path = last_path
@@ -492,18 +781,24 @@ class SyncApp:
     def _show_welcome_screen(self):
         win = Toplevel(self.root)
         win.title("Greetings and salutations")
-        win.geometry("520x670")
-        win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
+        
         self.root.update_idletasks()
+        win.update_idletasks()
+        
+        w = max(520, win.winfo_reqwidth())
+        h = max(670, win.winfo_reqheight())
+        
         rx = self.root.winfo_x()
         ry = self.root.winfo_y()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        x = rx + (rw - 520) // 2
-        y = ry + (rh - 640) // 2
-        win.geometry(f"520x670+{x}+{y}")
+        x = rx + (rw - w) // 2
+        y = ry + (rh - h) // 2
+        
+        win.geometry(f"+{x}+{y}")
+        win.minsize(520, 670)
 
         f = ttk.Frame(win, padding=24)
         f.pack(fill='both', expand=True)
@@ -511,16 +806,16 @@ class SyncApp:
         logo_label = ttk.Label(f, image=self.welcome_logo_img)
         logo_label.pack(anchor='w', pady=(0, 10))
 
-        ttk.Label(f, text="Get started with Nugget Sync", font=('System', 20, 'bold')).pack(anchor='w', pady=(0, 2))
-        ttk.Label(f, text="I am an Apple Music syncing tool for nuggets.", font=('System', 12, 'italic'), foreground='#666666').pack(anchor='w', pady=(0, 15))
+        ttk.Label(f, text="Get started with Nugget Sync", font=(UI_FONT, 20, 'bold')).pack(anchor='w', pady=(0, 2))
+        ttk.Label(f, text="Music library syncing tool for nuggets.", font=(UI_FONT, 12, 'italic'), foreground='#666666').pack(anchor='w', pady=(0, 15))
 
         def add_section(num_title, body_text):
-            ttk.Label(f, text=num_title, font=('System', 13, 'bold')).pack(anchor='w', pady=(8, 2))
-            lbl = ttk.Label(f, text=body_text, font=('System', 11), wraplength=470, justify='left')
+            ttk.Label(f, text=num_title, font=(UI_FONT, 13, 'bold')).pack(anchor='w', pady=(8, 2))
+            lbl = ttk.Label(f, text=body_text, font=(UI_FONT, 11), wraplength=470, justify='left')
             lbl.pack(anchor='w', pady=(0, 8))
 
         add_section("0. About me", 
-                    "Nugget Sync uses your local Apple Music library and allows it to be synced to any device or folder. It supports bi-directional changes, favorites syncing, AAC conversion, selection of library to be synced, playlists syncing and Rockbox specific features.")
+                    "Nugget Sync uses your local music library and allows it to be synced to any device or folder. It supports bi-directional changes, favorites syncing, AAC conversion, selection of library to be synced, playlists syncing and Rockbox specific features.")
 
         add_section("1. Select a drive", 
                     "Go to File > Change Destination…\nNugget Sync will remember this destination on the next app launch.")
@@ -625,9 +920,8 @@ class SyncApp:
             return
         if do_plays and (play_updates or skip_updates):
             try:
-                payload = json.dumps({"plays": play_updates, "skips": skip_updates})
-                subprocess.run(['osascript', '-l', 'JavaScript', '-e', JXA_UPDATE_COUNTS, payload])
-                self._log(f"Synced {sum(play_updates.values())} plays and {sum(skip_updates.values())} skips to Apple Music.", 'ok')
+                self.library.update_counts(play_updates, skip_updates)
+                self._log(f"Synced {sum(play_updates.values())} plays and {sum(skip_updates.values())} skips to Local Library.", 'ok')
             except Exception as e:
                 self._log(f"Error syncing playcounts: {e}", 'del')
         if do_plays and not do_lb:
@@ -680,10 +974,10 @@ class SyncApp:
         def prompt():
             win = Toplevel(self.root)
             win.title("Unknown Files Found")
-            win.geometry("380x110")
+            win.minsize(380, 110)
             win.attributes('-topmost', True)
             win.grab_set()
-            ttk.Label(win, text=f"Found {count} unrecognized files on the destination.\nWould you like to import them to Apple Music?", justify="center").pack(pady=10)
+            ttk.Label(win, text=f"Found {count} unrecognized files on the destination.\nWould you like to import them to your Local Library?", justify="center").pack(pady=10)
             btn_frame = ttk.Frame(win)
             btn_frame.pack(fill='x', padx=10, pady=5)
             def choose(c):
@@ -691,7 +985,7 @@ class SyncApp:
                 win.grab_release()
                 win.destroy()
                 ev.set()
-            ttk.Button(btn_frame, text="Import to Apple Music", command=lambda: choose('import')).pack(side='left', expand=True, padx=2)
+            ttk.Button(btn_frame, text="Import to Local Library", command=lambda: choose('import')).pack(side='left', expand=True, padx=2)
             ttk.Button(btn_frame, text="Delete", command=lambda: choose('delete')).pack(side='left', expand=True, padx=2)
             ttk.Button(btn_frame, text="Ignore", command=lambda: choose('ignore')).pack(side='left', expand=True, padx=2)
             win.protocol("WM_DELETE_WINDOW", lambda: choose('ask'))
@@ -718,7 +1012,7 @@ class SyncApp:
                     pass
 
     def _show_about(self):
-        messagebox.showinfo("About Nugget Sync", "Nugget Sync\nApple Music syncing tool for nuggets.\n© 2026")
+        messagebox.showinfo("About Nugget Sync", "Nugget Sync\nMusic library syncing tool for nuggets.\n© 2026")
 
     def _build_ui(self):
         self.root.configure(bg='#ececec')
@@ -765,7 +1059,7 @@ class SyncApp:
         self.header_label = ttk.Label(
             header_frame,
             text='  Nugget Sync',
-            font=('System', 24, 'bold'),
+            font=(UI_FONT, 24, 'bold'),
             image=self.logo_img,
             compound='left',
         )
@@ -809,16 +1103,19 @@ class SyncApp:
 
         self.progress = ttk.Progressbar(outer, length=500, mode='determinate')
         self.progress.grid(row=2, sticky='ew')
+        
+        self.root.update_idletasks()
+        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
 
     def _open_preferences(self):
         win = Toplevel(self.root)
         win.title("Preferences")
-        win.geometry("450x700")
+        win.minsize(450, 700)
         f = ttk.Frame(win, padding=15)
         f.pack(fill='both', expand=True)
 
         ttk.Label(f, text="Sync Content",
-                  font=('System', 13, 'bold')).pack(anchor='w', pady=(0, 5))
+                  font=(UI_FONT, 13, 'bold')).pack(anchor='w', pady=(0, 5))
         mode_var = StringVar(value=self.sync_prefs.get('sync_mode', 'all'))
         ttk.Radiobutton(f,
                         text="Entire Library",
@@ -925,13 +1222,14 @@ class SyncApp:
 
         launch_var = BooleanVar()
         launch_var.set(bool(self.sync_prefs.get('auto_launch', False)))
-        ttk.Checkbutton(f,
-                        text="Auto-launch app when drive connected",
-                        variable=launch_var).pack(anchor='w')
+        if sys.platform == 'darwin':
+            ttk.Checkbutton(f,
+                            text="Auto-launch app when drive connected",
+                            variable=launch_var).pack(anchor='w')
 
         ttk.Separator(f).pack(fill='x', pady=10)
         ttk.Label(f, text="Rockbox features",
-                  font=('System', 13, 'bold')).pack(anchor='w', pady=(0, 5))
+                  font=(UI_FONT, 13, 'bold')).pack(anchor='w', pady=(0, 5))
 
         playcounts_var = BooleanVar(value=self.sync_prefs.get('sync_rb_playcounts', True))
         ttk.Checkbutton(f, text="Sync database information", variable=playcounts_var).pack(anchor='w')
@@ -987,6 +1285,8 @@ class SyncApp:
         ) / "Library/LaunchAgents/com.norocoral.nuggetsync.autosync.plist"
 
     def _manage_launch_agent(self, enable):
+        if sys.platform != 'darwin':
+            return
         plist_path = self._get_plist_path()
         if enable:
             script_path = os.path.abspath(sys.argv[0])
@@ -1048,10 +1348,10 @@ class SyncApp:
             win.grab_set()
 
             if mac_mtime is not None and dap_mtime is not None:
-                newer = "Apple Music" if mac_mtime >= dap_mtime else "Nugget"
+                newer = "Local Library" if mac_mtime >= dap_mtime else "Nugget"
                 msg = (
                     f'Both sides of "{pl_name}" changed since the last sync.\n\n'
-                    f'  Apple Music last modified:    {_fmt(mac_mtime)}\n'
+                    f'  Local Library last modified:    {_fmt(mac_mtime)}\n'
                     f'  Nugget last modified: {_fmt(dap_mtime)}\n\n'
                     f'Newer copy: {newer}'
                 )
@@ -1075,7 +1375,7 @@ class SyncApp:
                 ev.set()
 
             ttk.Button(btn_frame,
-                       text="Keep Apple Music",
+                       text="Keep Local Library",
                        command=lambda: choose('mac')).pack(side='left',
                                                            expand=True,
                                                            padx=2)
@@ -1091,7 +1391,7 @@ class SyncApp:
                                                              padx=2)
 
             win.update_idletasks()
-            win.geometry(f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
+            win.minsize(win.winfo_reqwidth(), win.winfo_reqheight())
             win.protocol("WM_DELETE_WINDOW", lambda: (
                 win.grab_release(), win.destroy(), ev.set()
             ))
@@ -1126,14 +1426,14 @@ class SyncApp:
             return
         win = Toplevel(self.root)
         win.title("Sync Log")
-        win.geometry("700x450")
+        win.minsize(700, 450)
         self._log_win = win
 
         f = ttk.Frame(win)
         f.pack(fill='both', expand=True, padx=8, pady=8)
 
         tv = tk.Text(f, wrap='none', state='disabled',
-                     font=('Menlo', 11), bg='#1e1e1e', fg='#d4d4d4',
+                     font=(MONO_FONT, 11), bg='#1e1e1e', fg='#d4d4d4',
                      insertbackground='white')
         tv.pack(side='left', fill='both', expand=True)
         sb = ttk.Scrollbar(f, orient='vertical', command=tv.yview)
@@ -1171,11 +1471,11 @@ class SyncApp:
     def _open_item_selector(self):
         selector = Toplevel(self.root)
         selector.title("Select Items to Sync")
-        selector.geometry("500x600")
+        selector.minsize(500, 600)
 
         self._status("Loading metadata")
-        data = run_jxa(JXA_METADATA_LISTS)
-        pls = run_jxa(JXA_PLAYLISTS)
+        data = self.library.get_metadata_lists()
+        pls = self.library.get_playlists()
         self._status("")
 
         nb = ttk.Notebook(selector)
@@ -1341,12 +1641,12 @@ class SyncApp:
             self._log('No files will be written or deleted', 'info')
             self._status('Dry run enabled')
 
-        self._log('Using your Apple Music library', 'info')
+        self._log('Using your local music library', 'info')
         self._status('Checking music library')
         self._pct(2)
 
         try:
-            tracks_list = run_jxa(JXA_TRACKS)
+            tracks_list = self.library.get_tracks()
         except Exception as exc:
             self._log(f"Could not read library: {exc}", 'del')
             self.root.after(0, lambda: self.sync_btn.config(state='normal'))
@@ -1357,7 +1657,7 @@ class SyncApp:
         if self.sync_prefs.get('playlists', True):
             self._status('Checking playlists')
             try:
-                playlists = run_jxa(JXA_PLAYLISTS)
+                playlists = self.library.get_playlists()
                 self._log(f"   {len(playlists)} user playlists\n", 'dim')
             except Exception:
                 pass
@@ -1472,9 +1772,8 @@ class SyncApp:
                                 remove_tids = []
 
                             if add_tids or remove_tids:
-                                self._log("Syncing favorites to Apple Music", 'info')
-                                payload = json.dumps({"is_favorites": True, "add": add_tids, "remove": remove_tids})
-                                subprocess.run(['osascript', '-l', 'JavaScript', '-e', JXA_UPDATE_PLAYLIST, payload])
+                                self._log("Syncing favorites to Local Library", 'info')
+                                self.library.update_playlist({"is_favorites": True, "add": add_tids, "remove": remove_tids})
                                 for t in tracks_list:
                                     if t['id'] in add_tids: t['loved'] = True
                                     elif t['id'] in remove_tids: t['loved'] = False
@@ -1541,9 +1840,8 @@ class SyncApp:
                             dap_tids = merged_tids
 
                         if add_tids or remove_tids:
-                            self._log(f"Syncing {pl_name} to Apple Music", 'info')
-                            payload = json.dumps({"name": target_pl['name'], "is_favorites": False, "add": add_tids, "remove": remove_tids})
-                            subprocess.run(['osascript', '-l', 'JavaScript', '-e', JXA_UPDATE_PLAYLIST, payload])
+                            self._log(f"Syncing {pl_name} to Local Library", 'info')
+                            self.library.update_playlist({"name": target_pl['name'], "is_favorites": False, "add": add_tids, "remove": remove_tids})
                             target_pl['tracks'] = list(dap_tids)
                     except Exception as e:
                         self._log(
@@ -1806,7 +2104,7 @@ class SyncApp:
         if unrecognized:
             resolution = self._ask_import_conflict(len(unrecognized))
             if resolution == 'import':
-                self._status('Importing new files to Apple Music')
+                self._status('Importing new files to Local Library')
                 mac_import_dir = Path.home() / 'Music' / 'Nugget Imports'
                 mac_import_dir.mkdir(parents=True, exist_ok=True)
                 import time
@@ -1822,12 +2120,11 @@ class SyncApp:
                     try:
                         shutil.copy2(src_file, dst_file)
                         import_paths.append(str(dst_file))
-                        src_file.unlink() # Delete from destination so it syncs cleanly back later
+                        src_file.unlink()
                     except Exception: pass
                 if import_paths:
-                    payload = json.dumps(import_paths)
-                    subprocess.run(['osascript', '-l', 'JavaScript', '-e', JXA_IMPORT, payload])
-                    self._log(f"Imported {len(import_paths)} items to Apple Music.", 'ok')
+                    self.library.import_paths(import_paths)
+                    self._log(f"Imported {len(import_paths)} items to Local Library.", 'ok')
             elif resolution == 'delete':
                 for f in unrecognized:
                     try:
@@ -1982,7 +2279,17 @@ class SyncApp:
                     with tempfile.NamedTemporaryFile(suffix='.m4a', delete=False) as tmp:
                         tmp_path = tmp.name
                     try:
-                        subprocess.run(['afconvert', '-f', 'm4af', '-d', 'aac', '-b', str(target_kbps * 1000), str(src), tmp_path], check=True, capture_output=True)
+                        try:
+                            if sys.platform == 'darwin':
+                                subprocess.run(['afconvert', '-f', 'm4af', '-d', 'aac', '-b', str(target_kbps * 1000), str(src), tmp_path], check=True, capture_output=True)
+                            else:
+                                subprocess.run(['ffmpeg', '-i', str(src), '-c:a', 'aac', '-b:a', str(target_kbps * 1000), '-vn', '-y', tmp_path], check=True, capture_output=True)
+                        except FileNotFoundError:
+                            if sys.platform != 'darwin':
+                                raise RuntimeError("ffmpeg is required for conversion on Windows.")
+                            else:
+                                raise
+                                
                         if HAS_MUTAGEN:
                             try:
                                 tags = MP4(tmp_path)
@@ -2073,17 +2380,36 @@ class SyncApp:
                     with tempfile.NamedTemporaryFile(suffix='.bmp',
                                                      delete=False) as tmp_bmp:
                         bmp_path = tmp_bmp.name
-                    subprocess.run([
-                        'sips', '-s', 'format', 'bmp', '-z',
-                        str(ART_SIZE),
-                        str(ART_SIZE), tmp_path, '--out', bmp_path
-                    ],
-                                   capture_output=True)
-                    r = subprocess.run([
-                        'sips', '-s', 'format', 'jpeg', bmp_path, '--out',
-                        str(c_path)
-                    ],
-                                       capture_output=True)
+
+                    success = False
+                    if sys.platform == 'darwin':
+                        subprocess.run([
+                            'sips', '-s', 'format', 'bmp', '-z',
+                            str(ART_SIZE),
+                            str(ART_SIZE), tmp_path, '--out', bmp_path
+                        ], capture_output=True)
+                        r = subprocess.run([
+                            'sips', '-s', 'format', 'jpeg', bmp_path, '--out',
+                            str(c_path)
+                        ], capture_output=True)
+                        if r.returncode == 0 and c_path.exists():
+                            success = True
+                    else:
+                        try:
+                            from PIL import Image
+                            with Image.open(tmp_path) as img:
+                                img = img.convert('RGB')
+                                img = img.resize((ART_SIZE, ART_SIZE))
+                                img.save(c_path, 'JPEG')
+                            if c_path.exists():
+                                success = True
+                        except ImportError:
+                            try:
+                                r = subprocess.run(['ffmpeg', '-i', tmp_path, '-vf', f'scale={ART_SIZE}:{ART_SIZE}', '-vframes', '1', '-y', str(c_path)], capture_output=True)
+                                if r.returncode == 0 and c_path.exists():
+                                    success = True
+                            except Exception:
+                                pass
 
                     try:
                         os.unlink(tmp_path)
@@ -2094,7 +2420,7 @@ class SyncApp:
                     except OSError:
                         pass
 
-                    if r.returncode == 0 and c_path.exists():
+                    if success:
                         return True, a_dir, a_fp, a_name
                 except:
                     pass
@@ -2241,7 +2567,7 @@ class SyncApp:
             if errors > 0:
                 summary += f"\n{errors} items encountered issues during sync."
                 
-            if not cancelled and str(dest_root).startswith('/Volumes/'):
+            if not cancelled and sys.platform != 'win32' and str(dest_root).startswith('/Volumes/'):
                 summary += "\n\nWould you like to eject the drive?"
                 if messagebox.askyesno('Sync Successful', summary):
                     subprocess.run(['diskutil', 'eject', str(dest_root)], capture_output=True)
@@ -2256,13 +2582,34 @@ if __name__ == '__main__':
     lock_file_path = Path.home() / '.nugget_sync.lock'
     lock_file = open(lock_file_path, 'w')
     try:
-        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if sys.platform == 'win32':
+            import msvcrt
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (IOError, OSError):
         sys.exit(0)
 
     is_auto = "--auto" in sys.argv
 
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                import ctypes
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     root = Tk()
+
+    if sys.platform == 'win32':
+        import tkinter.font as tkfont
+        default_font = tkfont.nametofont("TkDefaultFont")
+        default_font.configure(family="Segoe UI", size=9)
+
     style = ttk.Style(root)
     if 'aqua' in style.theme_names():
         style.theme_use('aqua')
