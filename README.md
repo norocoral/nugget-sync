@@ -3,7 +3,7 @@
 ---
 
 > [!NOTE]
-> Only macOS is supported. I have no plans to make a Windows or Linux version
+> macOS (Music.app), Windows (iTunes) are supported.
 
 ### 0. About me
 Nugget Sync uses your local Apple Music library and allows it to be synced to any device or folder. It supports bi-directional changes, favorites syncing, AAC conversion, selection of library to be synced, playlists syncing and Rockbox specific feature
