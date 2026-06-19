@@ -275,7 +275,7 @@ class WindowsITunesLibrary(MediaLibrary):
                 self.xml_path = Path(p)
             else:
                 raise RuntimeError("iTunes Music Library.xml not found.")
-                
+
         try:
             import win32com.client  # type: ignore
             try:
@@ -307,15 +307,15 @@ class WindowsITunesLibrary(MediaLibrary):
         for track_id, t in data.get('Tracks', {}).items():
             if t.get('Track Type') != 'File':
                 continue
-            
+
             tid = t.get('Persistent ID')
             if not tid:
                 continue
-                
+
             loc = t.get('Location')
             if not loc:
                 continue
-            
+
             try:
                 from urllib.parse import urlparse
                 from urllib.request import url2pathname
@@ -327,7 +327,7 @@ class WindowsITunesLibrary(MediaLibrary):
                     loc = url2pathname(p)
             except Exception:
                 continue
-                
+
             mdate = 0
             md = t.get('Date Modified')
             if md:
@@ -335,7 +335,7 @@ class WindowsITunesLibrary(MediaLibrary):
                     mdate = int(md.timestamp() * 1000)
                 except Exception:
                     pass
-                
+
             tracks.append({
                 "id": tid,
                 "name": t.get('Name', ''),
@@ -365,7 +365,7 @@ class WindowsITunesLibrary(MediaLibrary):
                 tid = t.get('Persistent ID')
                 if tid:
                     track_id_to_pid[t.get('Track ID')] = tid
-                    
+
         playlists = []
         for pl in data.get('Playlists', []):
             if pl.get('Master') or pl.get('Folder'):
@@ -374,21 +374,21 @@ class WindowsITunesLibrary(MediaLibrary):
                 continue
             if 'Distinguished Kind' in pl:
                 continue
-                
+
             name = pl.get('Name')
             if not name:
                 continue
-                
+
             is_smart = 'Smart Info' in pl
             tids = []
             for item in pl.get('Playlist Items', []):
                 pid = track_id_to_pid.get(item.get('Track ID'))
                 if pid:
                     tids.append(pid)
-                    
+
             if tids:
                 playlists.append({"name": name, "tracks": tids, "smart": is_smart})
-                
+
         return playlists
 
     def get_metadata_lists(self):
@@ -396,13 +396,13 @@ class WindowsITunesLibrary(MediaLibrary):
         artists = set()
         albums = set()
         genres = set()
-        
+
         for t in data.get('Tracks', {}).values():
             if t.get('Track Type') == 'File':
                 artists.add(t.get('Artist') or "Unknown Artist")
                 albums.add(t.get('Album') or "Unknown Album")
                 genres.add(t.get('Genre') or "Unknown Genre")
-                
+
         return {
             "artists": sorted(list(artists)),
             "albums": sorted(list(albums)),
@@ -465,10 +465,10 @@ class WindowsITunesLibrary(MediaLibrary):
                         break
             except Exception:
                 pass
-            
+
             if not target_pl:
                 return
-            
+
             remove = set(payload.get("remove", []))
             if remove:
                 try:
@@ -482,7 +482,7 @@ class WindowsITunesLibrary(MediaLibrary):
                             pass
                 except Exception:
                     pass
-                        
+
             for tid in payload.get("add", []):
                 t = self._get_track_by_id(tid)
                 if t:
@@ -2606,6 +2606,7 @@ class SyncApp:
 
         self.root.after(100, _reset_ui)
 
+
 if __name__ == '__main__':
     lock_file_path = Path.home() / '.nugget_sync.lock'
     lock_file = open(lock_file_path, 'w')
@@ -2637,6 +2638,13 @@ if __name__ == '__main__':
         import tkinter.font as tkfont
         default_font = tkfont.nametofont("TkDefaultFont")
         default_font.configure(family="Segoe UI", size=9)
+        try:
+            root.iconbitmap(resource_path("ICN.ICO"))
+        except Exception:
+            try:
+                root.iconbitmap(resource_path("assets/ICN.ICO"))
+            except Exception:
+                pass
 
     style = ttk.Style(root)
     if 'aqua' in style.theme_names():
@@ -2646,7 +2654,8 @@ if __name__ == '__main__':
 
     if is_auto:
         target = Path(app.dest_var.get())
-        is_correct_drive = target.exists() and (target / MANIFEST_FILE).exists()
+        is_correct_drive = target.exists() and (target /
+                                                MANIFEST_FILE).exists()
 
         if is_correct_drive and app.sync_prefs.get('auto_launch'):
             root.lift()
