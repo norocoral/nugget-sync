@@ -217,19 +217,19 @@ JSON.stringify({
 class MediaLibrary:
     def get_tracks(self):
         raise NotImplementedError
-        
+
     def get_playlists(self):
         raise NotImplementedError
-        
+
     def get_metadata_lists(self):
         raise NotImplementedError
-        
+
     def update_playlist(self, payload):
         raise NotImplementedError
-        
+
     def import_paths(self, paths):
         raise NotImplementedError
-        
+
     def update_counts(self, plays, skips):
         raise NotImplementedError
 
@@ -262,158 +262,164 @@ class MacMusicLibrary(MediaLibrary):
     def update_counts(self, plays, skips):
         self._run_jxa(JXA_UPDATE_COUNTS, json.dumps({"plays": plays, "skips": skips}))
 
+
 class WindowsITunesLibrary(MediaLibrary):
     def __init__(self):
+        self.xml_path = self._find_itunes_xml()
+        self._xml_data = None
+        if not self.xml_path:
+            from tkinter import messagebox, filedialog
+            messagebox.showinfo("iTunes XML Required", "Could not find iTunes Music Library.xml. Please ensure 'Share iTunes Library XML with other applications' is enabled in iTunes Preferences > Advanced, then locate the file.")
+            p = filedialog.askopenfilename(title="Select iTunes Library XML", filetypes=[("XML Files", "*.xml")])
+            if p:
+                self.xml_path = Path(p)
+            else:
+                raise RuntimeError("iTunes Music Library.xml not found.")
+                
         try:
             import win32com.client  # type: ignore
-            self.itunes = win32com.client.Dispatch("iTunes.Application")
-        except ImportError:
-            raise RuntimeError("pywin32 is required to use iTunes on Windows.")
-            
-    def _get_tid(self, track):
-        try:
-            high = self.itunes.ITObjectPersistentIDHigh(track)
-            low = self.itunes.ITObjectPersistentIDLow(track)
-            return f"{(high & 0xFFFFFFFF):08X}{(low & 0xFFFFFFFF):08X}"
+            try:
+                self.itunes = win32com.client.gencache.EnsureDispatch("iTunes.Application")
+            except Exception:
+                self.itunes = win32com.client.Dispatch("iTunes.Application")
         except Exception:
-            return ""
-            
+            self.itunes = None
+
+    def _find_itunes_xml(self):
+        music_dir = Path.home() / "Music" / "iTunes"
+        for name in ["iTunes Music Library.xml", "iTunes Library.xml"]:
+            p = music_dir / name
+            if p.exists():
+                return p
+        return None
+
+    def _get_xml_data(self):
+        if self._xml_data is None:
+            import plistlib
+            with open(self.xml_path, 'rb') as f:
+                self._xml_data = plistlib.load(f)
+        return self._xml_data
+
     def get_tracks(self):
+        self._xml_data = None  # Force reload from disk
+        data = self._get_xml_data()
         tracks = []
-        library_playlist = None
-        for pl in self.itunes.LibrarySource.Playlists:
-            if pl.Kind == 1: # ITPlaylistKindLibrary
-                library_playlist = pl
-                break
-        
-        if not library_playlist:
-            return []
-            
-        for t in library_playlist.Tracks:
-            if t.Kind != 1: # ITTrackKindFile
+        for track_id, t in data.get('Tracks', {}).items():
+            if t.get('Track Type') != 'File':
                 continue
             
-            tid = self._get_tid(t)
+            tid = t.get('Persistent ID')
             if not tid:
                 continue
+                
+            loc = t.get('Location')
+            if not loc:
+                continue
             
             try:
-                loc = t.Location
-                if not loc:
-                    continue
-            except:
+                from urllib.parse import urlparse
+                from urllib.request import url2pathname
+                parsed = urlparse(loc)
+                if parsed.scheme == 'file':
+                    p = parsed.path
+                    if parsed.netloc and parsed.netloc != 'localhost':
+                        p = '//' + parsed.netloc + p
+                    loc = url2pathname(p)
+            except Exception:
                 continue
                 
-            try:
-                mdate = 0
-                if t.ModificationDate:
-                    try:
-                        mdate = int(t.ModificationDate.timestamp() * 1000)
-                    except AttributeError:
-                        import datetime
-                        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-                        dt = datetime.datetime(
-                            t.ModificationDate.year, t.ModificationDate.month, t.ModificationDate.day,
-                            t.ModificationDate.hour, t.ModificationDate.minute, t.ModificationDate.second,
-                            tzinfo=datetime.timezone.utc
-                        )
-                        mdate = int((dt - epoch).total_seconds() * 1000)
-            except:
-                pass
+            mdate = 0
+            md = t.get('Date Modified')
+            if md:
+                try:
+                    mdate = int(md.timestamp() * 1000)
+                except Exception:
+                    pass
                 
-            try: loved = t.Loved
-            except: loved = False
-            
-            try: bitRate = t.BitRate
-            except: bitRate = 0
-            
-            try: bpm = t.BPM
-            except: bpm = 0
-            
-            try: trackNumber = t.TrackNumber
-            except: trackNumber = 0
-            
-            try: discNumber = t.DiscNumber
-            except: discNumber = 1
-            
-            try: discCount = t.DiscCount
-            except: discCount = 1
-            
-            try: year = t.Year
-            except: year = 0
-            
             tracks.append({
                 "id": tid,
-                "name": t.Name or "",
-                "artist": t.Artist or "",
-                "albumArtist": t.AlbumArtist or "",
-                "album": t.Album or "",
-                "genre": t.Genre or "",
-                "kind": t.KindAsString or "",
-                "trackNumber": trackNumber,
-                "discNumber": discNumber,
-                "discCount": discCount,
+                "name": t.get('Name', ''),
+                "artist": t.get('Artist', ''),
+                "albumArtist": t.get('Album Artist', ''),
+                "album": t.get('Album', ''),
+                "genre": t.get('Genre', ''),
+                "kind": t.get('Kind', ''),
+                "trackNumber": t.get('Track Number', 0),
+                "discNumber": t.get('Disc Number', 1),
+                "discCount": t.get('Disc Count', 1),
                 "mdate": mdate,
-                "bitRate": bitRate,
-                "bpm": bpm,
-                "year": year,
-                "composer": t.Composer or "",
+                "bitRate": t.get('Bit Rate', 0),
+                "bpm": t.get('BPM', 0),
+                "year": t.get('Year', 0),
+                "composer": t.get('Composer', ''),
                 "location": loc,
-                "loved": loved
+                "loved": t.get('Loved', False)
             })
         return tracks
 
     def get_playlists(self):
+        data = self._get_xml_data()
+        track_id_to_pid = {}
+        for t in data.get('Tracks', {}).values():
+            if t.get('Track Type') == 'File':
+                tid = t.get('Persistent ID')
+                if tid:
+                    track_id_to_pid[t.get('Track ID')] = tid
+                    
         playlists = []
-        for pl in self.itunes.LibrarySource.Playlists:
-            if pl.Kind != 2: # User playlists
+        for pl in data.get('Playlists', []):
+            if pl.get('Master') or pl.get('Folder'):
                 continue
-            
-            try:
-                name = pl.Name
-                is_smart = pl.Smart
-            except:
+            if not pl.get('Visible', True):
+                continue
+            if 'Distinguished Kind' in pl:
                 continue
                 
+            name = pl.get('Name')
+            if not name:
+                continue
+                
+            is_smart = 'Smart Info' in pl
             tids = []
-            for t in pl.Tracks:
-                if t.Kind == 1:
-                    tid = self._get_tid(t)
-                    if tid:
-                        tids.append(tid)
-            
+            for item in pl.get('Playlist Items', []):
+                pid = track_id_to_pid.get(item.get('Track ID'))
+                if pid:
+                    tids.append(pid)
+                    
             if tids:
                 playlists.append({"name": name, "tracks": tids, "smart": is_smart})
+                
         return playlists
 
     def get_metadata_lists(self):
+        data = self._get_xml_data()
         artists = set()
         albums = set()
         genres = set()
         
-        library_playlist = None
-        for pl in self.itunes.LibrarySource.Playlists:
-            if pl.Kind == 1:
-                library_playlist = pl
-                break
+        for t in data.get('Tracks', {}).values():
+            if t.get('Track Type') == 'File':
+                artists.add(t.get('Artist') or "Unknown Artist")
+                albums.add(t.get('Album') or "Unknown Album")
+                genres.add(t.get('Genre') or "Unknown Genre")
                 
-        if library_playlist:
-            for t in library_playlist.Tracks:
-                if t.Kind == 1:
-                    try:
-                        artists.add(t.Artist or "Unknown Artist")
-                        albums.add(t.Album or "Unknown Album")
-                        genres.add(t.Genre or "Unknown Genre")
-                    except:
-                        pass
-                        
         return {
             "artists": sorted(list(artists)),
             "albums": sorted(list(albums)),
             "genres": sorted(list(genres))
         }
 
+    def _get_tid(self, track):
+        if not self.itunes: return ""
+        try:
+            high = self.itunes.ITObjectPersistentIDHigh(track)
+            low = self.itunes.ITObjectPersistentIDLow(track)
+            return f"{(high & 0xFFFFFFFF):08X}{(low & 0xFFFFFFFF):08X}"
+        except Exception:
+            return ""
+
     def _get_track_by_id(self, tid):
+        if not self.itunes: return None
         try:
             high = int(tid[:8], 16)
             if high >= 0x80000000:
@@ -422,10 +428,12 @@ class WindowsITunesLibrary(MediaLibrary):
             if low >= 0x80000000:
                 low -= 0x100000000
             return self.itunes.LibraryPlaylist.Tracks.ItemByPersistentID(high, low)
-        except:
+        except Exception:
             return None
 
     def update_playlist(self, payload):
+        if not self.itunes:
+            return
         if payload.get("is_favorites"):
             for tid in payload.get("add", []):
                 t = self._get_track_by_id(tid)
@@ -440,24 +448,40 @@ class WindowsITunesLibrary(MediaLibrary):
         else:
             name = payload.get("name")
             target_pl = None
-            for pl in self.itunes.LibrarySource.Playlists:
-                if getattr(pl, 'Name', '') == name and getattr(pl, 'Kind', 0) == 2:
-                    target_pl = pl
-                    break
+            try:
+                sources = self.itunes.Sources
+                for i in range(1, sources.Count + 1):
+                    s = sources.Item(i)
+                    if getattr(s, 'Kind', 0) == 1:
+                        pls = s.Playlists
+                        for j in range(1, pls.Count + 1):
+                            pl = pls.Item(j)
+                            try:
+                                if getattr(pl, 'Name', '') == name and getattr(pl, 'Kind', 0) == 2:
+                                    target_pl = pl
+                                    break
+                            except Exception:
+                                pass
+                        break
+            except Exception:
+                pass
             
             if not target_pl:
                 return
             
             remove = set(payload.get("remove", []))
             if remove:
-                for i in range(target_pl.Tracks.Count, 0, -1):
-                    try:
-                        t = target_pl.Tracks.Item(i)
-                        tid = self._get_tid(t)
-                        if tid in remove:
-                            t.Delete()
-                    except:
-                        pass
+                try:
+                    for i in range(target_pl.Tracks.Count, 0, -1):
+                        try:
+                            t = target_pl.Tracks.Item(i)
+                            tid = self._get_tid(t)
+                            if tid in remove:
+                                t.Delete()
+                        except:
+                            pass
+                except Exception:
+                    pass
                         
             for tid in payload.get("add", []):
                 t = self._get_track_by_id(tid)
@@ -466,6 +490,8 @@ class WindowsITunesLibrary(MediaLibrary):
                     except: pass
 
     def import_paths(self, paths):
+        if not self.itunes:
+            return
         for p in paths:
             try:
                 self.itunes.LibraryPlaylist.AddFile(p)
@@ -473,6 +499,8 @@ class WindowsITunesLibrary(MediaLibrary):
                 pass
 
     def update_counts(self, plays, skips):
+        if not self.itunes:
+            return
         for tid, count in plays.items():
             t = self._get_track_by_id(tid)
             if t:
@@ -736,7 +764,7 @@ class SyncApp:
         known_devices = self.config.get('known_devices', [])
         self.valid_path = ""
         self.library = get_media_library()
-        
+
         if last_path and Path(last_path).exists():
             self.valid_path = last_path
         else:
@@ -783,20 +811,20 @@ class SyncApp:
         win.title("Greetings and salutations")
         win.transient(self.root)
         win.grab_set()
-        
+
         self.root.update_idletasks()
         win.update_idletasks()
-        
+
         w = max(520, win.winfo_reqwidth())
         h = max(670, win.winfo_reqheight())
-        
+
         rx = self.root.winfo_x()
         ry = self.root.winfo_y()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
         x = rx + (rw - w) // 2
         y = ry + (rh - h) // 2
-        
+
         win.geometry(f"+{x}+{y}")
         win.minsize(520, 670)
 
@@ -814,16 +842,16 @@ class SyncApp:
             lbl = ttk.Label(f, text=body_text, font=(UI_FONT, 11), wraplength=470, justify='left')
             lbl.pack(anchor='w', pady=(0, 8))
 
-        add_section("0. About me", 
+        add_section("0. About me",
                     "Nugget Sync uses your local music library and allows it to be synced to any device or folder. It supports bi-directional changes, favorites syncing, AAC conversion, selection of library to be synced, playlists syncing and Rockbox specific features.")
 
-        add_section("1. Select a drive", 
+        add_section("1. Select a drive",
                     "Go to File > Change Destination…\nNugget Sync will remember this destination on the next app launch.")
-        add_section("2. Change settings", 
+        add_section("2. Change settings",
                     "Go to Nugget Sync > Settings…\nNugget Sync will remember settings for this destination.")
-        add_section("3. Sync to destination", 
+        add_section("3. Sync to destination",
                     "Click ‘Do it.’ on the main UI screen. It will sync shortly.\nPlease ensure to allow any permissions, such as your Music library and access to removable drives.")
-        add_section("4. Upon completion", 
+        add_section("4. Upon completion",
                     "Once the sync is completed, you can safely eject. Nugget Sync can do it from the UI if you wish.\n\n"
                     "Important note: A .NUGLIB file will be created in the destination device. DO NOT DELETE IT. "
                     "It manages the sync settings for the device and the internal library. If deleted, sync will run slower and potential data loss will occur.")
@@ -836,7 +864,7 @@ class SyncApp:
 
         btn = ttk.Button(f, text="Okay, I'm done", command=close_welcome)
         btn.pack(side='bottom', pady=(15, 0))
-        
+
         win.protocol("WM_DELETE_WINDOW", close_welcome)
 
     def _on_closing(self):
@@ -862,25 +890,25 @@ class SyncApp:
     def _save_local_config(self):
         self.config['last_path'] = self.dest_var.get()
         self.config['last_prefs'] = self.sync_prefs
-        
+
         known = self.config.get('known_devices', [])
         if self.config['last_path'] and self.config['last_path'] not in known:
             known.insert(0, self.config['last_path'])
         self.config['known_devices'] = known
-        
+
         LOCAL_CONFIG.write_text(json.dumps(self.config))
 
     def _process_rockbox_log(self, dest_root, tracks_list):
         log_file = dest_root / '.scrobbler.log'
         if not log_file.exists(): return
-        
+
         token = self.sync_prefs.get('listenbrainz_token', '').strip()
         if token.lower().startswith('token '): token = token[6:].strip()
         do_lb = bool(token)
         do_plays = self.sync_prefs.get('sync_rb_playcounts', True)
-        
+
         if not (do_lb or do_plays): return
-        
+
         self._log("Processing scrobbles", 'info')
         listens = []
         play_updates = {}
@@ -890,27 +918,27 @@ class SyncApp:
             for t in tracks_list:
                 key = f"{t.get('artist','')}|{t.get('album','')}|{t.get('name','')}".lower()
                 track_map[key] = t.get('id')
-                
+
         try:
             lines = log_file.read_text(encoding='utf-8', errors='replace').splitlines()
             for line in lines:
                 if line.startswith('#') or not line.strip(): continue
                 parts = line.split('\t')
-                
+
                 if len(parts) >= 7:
                     artist = parts[0].strip() or "Unknown Artist"
                     album = parts[1].strip()
                     title = parts[2].strip() or "Unknown Track"
                     rating = parts[5]
                     timestamp = int(parts[6])
-                    
+
                     if do_plays:
                         key = f"{artist}|{album}|{title}".lower()
                         tid = track_map.get(key)
                         if tid:
                             if rating == 'L': play_updates[tid] = play_updates.get(tid, 0) + 1
                             elif rating == 'S': skip_updates[tid] = skip_updates.get(tid, 0) + 1
-                            
+
                     if do_lb and rating == 'L':
                         track_metadata = {"artist_name": artist, "track_name": title}
                         if album: track_metadata["release_name"] = album
@@ -1025,7 +1053,7 @@ class SyncApp:
         file_menu.add_separator()
         file_menu.add_command(label="Change Destination…", command=self._pick_dest, accelerator="Cmd+D")
         menubar.add_cascade(label="File", menu=file_menu)
-        
+
         edit_menu = tk.Menu(menubar, tearoff=False)
         edit_menu.add_command(label="Preferences", command=self._open_preferences, accelerator="Cmd+,")
         menubar.add_cascade(label="Edit", menu=edit_menu)
@@ -1040,7 +1068,7 @@ class SyncApp:
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.createcommand("tk::mac::ShowPreferences", self._open_preferences)
-        
+
         self.root.bind('<Command-r>', lambda e: self._start_sync() if self.sync_btn['state'] != 'disabled' else None)
         self.root.bind('<Command-d>', lambda e: self._pick_dest())
         self.root.bind('<Command-l>', lambda e: self._open_log_window())
@@ -1064,7 +1092,7 @@ class SyncApp:
             compound='left',
         )
         self.header_label.pack(side='left')
-        
+
         self.sync_btn = ttk.Button(
             header_frame,
             text='Do it.',
@@ -1094,7 +1122,7 @@ class SyncApp:
 
         self.dest_var.trace_add('write', update_header)
         update_header()
-        
+
         self.cancel_btn = ttk.Button(
             header_frame,
             text='STOP',
@@ -1103,7 +1131,7 @@ class SyncApp:
 
         self.progress = ttk.Progressbar(outer, length=500, mode='determinate')
         self.progress.grid(row=2, sticky='ew')
-        
+
         self.root.update_idletasks()
         self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
 
@@ -1524,7 +1552,7 @@ class SyncApp:
         def update():
             v = getattr(self, 'current_pct', 0)
             msg = getattr(self, 'last_status_msg', '')
-            
+
             eta_str = ""
             if getattr(self, 'is_syncing', False) and v > 0 and v < 100:
                 smoothed = getattr(self, 'smoothed_eta', None)
@@ -1536,7 +1564,7 @@ class SyncApp:
 
             title_str = f"Nugget Sync{eta_str}" if getattr(self, 'is_syncing', False) else "Nugget Sync"
             self.root.title(title_str)
-            
+
             if msg:
                 self.header_label.config(text=f"  {msg}")
 
@@ -1627,7 +1655,7 @@ class SyncApp:
             self._status('Invalid destination')
             self.root.after(0, self._cancel_sync)
             return
-            
+
         dest_root = Path(dest_path)
         if dest_root in (Path('/'), Path.home(), Path('/Volumes')):
             messagebox.showerror("Invalid Destination", "Cannot sync to root or system directories. Select a valid removable drive or folder.")
@@ -1963,7 +1991,7 @@ class SyncApp:
             loc_for_src_fp = track.get('location', '')
             cur_src_fp = source_fp(loc_for_src_fp) if loc_for_src_fp else ''
             old_src_fp = old.get('src_fp', '')
-            
+
             if old_src_fp:
                 src_unchanged = (cur_src_fp == old_src_fp)
             else:
@@ -2077,21 +2105,21 @@ class SyncApp:
             managed_paths.add(unicodedata.normalize('NFC', str(p)))
         for job in copy_jobs:
             managed_paths.add(unicodedata.normalize('NFC', str(job['dst'])))
-                
+
         unrecognized = []
         if music_dir.exists():
             for f in music_dir.rglob('*'):
                 if f.is_file() and f.suffix.lower() in MEDIA_EXTS:
                     if unicodedata.normalize('NFC', str(f)) not in managed_paths:
                         unrecognized.append(f)
-                        
+
         if playlists_dir.exists():
             expected_pl_names = {unicodedata.normalize('NFC', sanitize(p['name']) + '.m3u8') for p in playlists}
             if self.sync_prefs.get('sync_favorites'):
                 expected_pl_names.add(unicodedata.normalize('NFC', 'Favorites.m3u8'))
-                
+
             known_old_pls = {unicodedata.normalize('NFC', name + '.m3u8') for name in last_playlist_state.keys()}
-            
+
             for f in playlists_dir.glob('*.m3u8'):
                 norm_name = unicodedata.normalize('NFC', f.name)
                 if norm_name not in expected_pl_names and norm_name not in known_old_pls:
@@ -2289,7 +2317,7 @@ class SyncApp:
                                 raise RuntimeError("ffmpeg is required for conversion on Windows.")
                             else:
                                 raise
-                                
+
                         if HAS_MUTAGEN:
                             try:
                                 tags = MP4(tmp_path)
@@ -2549,7 +2577,7 @@ class SyncApp:
         self._pct(100 if not cancelled else 0)
         self.is_syncing = False
         self.root.title("Nugget Sync")
-        
+
         def _reset_ui():
             self.cancel_btn.pack_forget()
             self.cancel_btn.config(state='normal')
@@ -2557,7 +2585,7 @@ class SyncApp:
             self.sync_btn.config(state='normal')
             self.last_status_msg = ""
             self.header_label.config(text=f'  Sync to {dest_root.name}')
-                
+
             summary = (f"{'Cancelled sync for' if cancelled else 'Synced music library to'} {dest_root.name}\n\n"
                        f"Tracks Copied: {copied}\n"
                        f"Tracks Updated: {updated}\n"
@@ -2566,7 +2594,7 @@ class SyncApp:
                        f"Artwork Processed: {art_saved}\n")
             if errors > 0:
                 summary += f"\n{errors} items encountered issues during sync."
-                
+
             if not cancelled and sys.platform != 'win32' and str(dest_root).startswith('/Volumes/'):
                 summary += "\n\nWould you like to eject the drive?"
                 if messagebox.askyesno('Sync Successful', summary):
